@@ -21,7 +21,10 @@ except Exception as e:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- Function: Convert text to speech ---
+if "input_key" not in st.session_state:
+    st.session_state.input_key = 0  # For resetting text input
+
+# --- Convert text to speech ---
 def speak_text(text, lang="en"):
     try:
         tts = gTTS(text=text, lang=lang, slow=False)
@@ -30,7 +33,7 @@ def speak_text(text, lang="en"):
         mp3_buffer.seek(0)
         return mp3_buffer.read()
     except Exception as e:
-        st.error(f"Failed: {str(e)}")
+        st.error(f"❌ TTS failed: {str(e)}")
         return None
 
 # --- Display chat history ---
@@ -43,12 +46,20 @@ for message in st.session_state.messages:
 # --- Input Section: Text + Mic ---
 text_col, mic_col = st.columns([10, 1])
 
+# Use dynamic key to allow reset
+input_key = f"user_input_{st.session_state.input_key}"
+
 with text_col:
-    user_text = st.text_input("Message", key="input_text", label_visibility="collapsed", placeholder="Type a message...")
+    user_text = st.text_input(
+        "Message",
+        key=input_key,
+        placeholder="Type a message...",
+        label_visibility="collapsed"
+    )
 
 with mic_col:
     st.write(" ")
-    voice_clicked = st.button("🎤", key="btn_mic", help="Speak")
+    voice_clicked = st.button("🎤", key="mic_btn", help="Hold to speak")
 
 # --- Handle Voice Input ---
 if voice_clicked:
@@ -56,57 +67,67 @@ if voice_clicked:
 
 if st.session_state.get("recording"):
     with st.sidebar:
-        st.info("🎙️ Speak now...")
-        audio_bytes = st.audio_input("Recording...", key="audio_input")
+        st.info("🎙️ Speak now. Click outside to stop.")
+        audio_bytes = st.audio_input("Record your voice", key="voice_recorder")
+
         if audio_bytes:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-                tmp_file.write(audio_bytes.getvalue())
-                tmp_path = tmp_file.name
-            r = sr.Recognizer()
             try:
+                # Save to temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                    tmp_file.write(audio_bytes.getvalue())
+                    tmp_path = tmp_file.name
+
+                # STT
+                r = sr.Recognizer()
                 with sr.AudioFile(tmp_path) as source:
                     audio = r.record(source)
                 text = r.recognize_google(audio)
-                if text:
-                    if not any(m.get("content") == text and m["role"] == "user" for m in st.session_state.messages):
-                        st.session_state.messages.append({"role": "user", "content": text})
-                        st.rerun()
+
+                if text and not any(m["content"] == text for m in st.session_state.messages if m["role"] == "user"):
+                    st.session_state.messages.append({"role": "user", "content": text})
+                    st.session_state.input_key += 1  # Reset input key
+                    st.rerun()
+
             except Exception as e:
-                st.sidebar.error(f"STT Error: {e}")
+                st.sidebar.error(f"🎤 Error: {str(e)}")
             finally:
                 st.session_state.recording = False
 
 # --- Handle Text Input ---
 if user_text.strip():
-    # Prevent duplicate user messages
-    if not any(m["content"] == user_text and m["role"] == "user" for m in st.session_state.messages):
+    if not any(m["content"] == user_text for m in st.session_state.messages if m["role"] == "user"):
         st.session_state.messages.append({"role": "user", "content": user_text})
-        st.rerun()
+    
+    # Reset input by incrementing key
+    st.session_state.input_key += 1
+    st.rerun()
 
 # --- Generate AI Response ---
 for idx, msg in enumerate(st.session_state.messages):
     if msg["role"] == "user":
-        ai_reply_key = f"ai_reply_done_{idx}"
-        if ai_reply_key not in st.session_state:
+        ai_key = f"ai_replied_{idx}"
+        if ai_key not in st.session_state:
             with st.chat_message("assistant"):
                 with st.spinner("🧠 Thinking..."):
                     try:
                         response = model.generate_content(msg["content"])
                         ai_text = response.text.strip()
                     except Exception as e:
-                        ai_text = "I'm sorry, I couldn't respond."
+                        ai_text = "I'm sorry, I couldn't process your request."
 
                 st.markdown(ai_text)
                 audio_data = speak_text(ai_text)
                 if audio_data:
                     st.audio(audio_data, format="audio/mp3")
 
+                # Append AI response
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": ai_text,
                     "audio": audio_data
                 })
 
-            st.session_state[ai_reply_key] = True
-            st.rerun()
+            # Mark as processed
+            st.session_state[ai_key] = True
+            st.rerun()  
             break
